@@ -218,6 +218,7 @@ class ScalarExprEmitter
   CGBuilderTy &Builder;
   bool IgnoreResultAssign;
   llvm::LLVMContext &VMContext;
+  std::unique_ptr<llvm::DominatorTree> DT;
 public:
 
   ScalarExprEmitter(CodeGenFunction &cgf, bool ira=false)
@@ -228,6 +229,35 @@ public:
   //===--------------------------------------------------------------------===//
   //                               Utilities
   //===--------------------------------------------------------------------===//
+  llvm::DominatorTree& getDT(llvm::Function &F) {
+    if (!DT)
+      DT = std::make_unique<llvm::DominatorTree>(F);
+    return *DT;
+  }
+
+  bool checkPhiNodeDominance(llvm::PHINode *Phi) {
+    llvm::Instruction *I = cast<llvm::Instruction>(Phi);
+    llvm::DominatorTree &DT = getDT(*(I->getFunction()));
+
+    for (unsigned i = 0; i < Phi->getNumIncomingValues(); ++i) {
+      llvm::Value *Op = Phi->getIncomingValue(i);
+
+     // If we have an invalid invoke, don't try to compute the dominance.
+      if (llvm::InvokeInst *II = dyn_cast<llvm::InvokeInst>(Op)) {
+        if (II->getNormalDest() == II->getUnwindDest())
+          // No need to check dominance.
+          return true;
+      }
+
+      llvm::Use &U = I->getOperandUse(i);
+      if (!DT.dominates(Op, U)) {
+        // In case Op does not dominate its use, return false.
+        return false;
+      }
+    }
+    // All incoming values dominate their uses.
+    return true;
+  }
 
   bool TestAndClearIgnoreResultAssign() {
     bool I = IgnoreResultAssign;
@@ -5000,6 +5030,12 @@ VisitAbstractConditionalOperator(const AbstractConditionalOperator *E) {
   llvm::PHINode *PN = Builder.CreatePHI(LHS->getType(), 2, "cond");
   PN->addIncoming(LHS, LHSBlock);
   PN->addIncoming(RHS, RHSBlock);
+
+  // Verify correctness of created PHI node.
+  // if (!checkPhiNodeDominance(PN))
+  //   PN->removeIncomingValueIf([](unsigned idx) { return idx < 2; });
+
+  assert(checkPhiNodeDominance(PN) && "Incorrect phi node, not both incoming values dominate their uses!"); 
 
   return PN;
 }
